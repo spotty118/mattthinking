@@ -446,7 +446,7 @@ class SupabaseAdapter(StorageBackendInterface):
             return result.count
             
         except Exception as e:
-            self.logger.error(f"Failed to count traces: {str(e)}")
+            logger.error(f"Failed to count traces: {str(e)}")
             return 0
     
     def count_memories(self, has_error_context: Optional[bool] = None) -> int:
@@ -472,7 +472,7 @@ class SupabaseAdapter(StorageBackendInterface):
             return result.count
             
         except Exception as e:
-            self.logger.error(f"Failed to count memories: {str(e)}")
+            logger.error(f"Failed to count memories: {str(e)}")
             return 0
     
     def get_statistics(self, workspace_id: Optional[str] = None) -> Dict[str, Any]:

@@ -16,7 +16,7 @@ import json
 import logging
 import math
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any, Tuple
 from dataclasses import dataclass, asdict
 
@@ -352,7 +352,7 @@ class ReasoningBank:
             
             # Convert to MemoryItem and compute composite scores
             memories_with_scores = []
-            current_time = datetime.now()
+            current_time = datetime.now(timezone.utc)
             
             for schema in memory_schemas:
                 memory = MemoryItem.from_schema(schema)
@@ -410,7 +410,7 @@ class ReasoningBank:
             Composite score between 0.0 and 1.0
         """
         if current_time is None:
-            current_time = datetime.now()
+            current_time = datetime.now(timezone.utc)
         
         # 1. Similarity score (from vector search)
         similarity = memory.similarity_score or 0.5  # Default if not available

@@ -13,6 +13,7 @@ storing and reusing LLM responses to reduce API calls and costs. It implements:
 import hashlib
 import json
 import time
+import threading
 from collections import OrderedDict
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
@@ -90,6 +91,9 @@ class CachedLLMClient:
         # LRU cache using OrderedDict
         # Key: cache_key (str), Value: (ResponsesAPIResult, timestamp)
         self._cache: OrderedDict[str, tuple[ResponsesAPIResult, float]] = OrderedDict()
+        
+        # Thread safety lock for cache operations
+        self._cache_lock = threading.Lock()
         
         # Statistics tracking
         self._cache_hits = 0
@@ -226,12 +230,10 @@ class CachedLLMClient:
         if model is None:
             model = self.client.default_model
         
-        # Track total requests
-        total_requests = self._cache_hits + self._cache_misses + self._cache_bypassed + 1
-        
         # Only cache deterministic calls (temperature=0.0)
         if not self.enable_cache or temperature != 0.0:
-            self._cache_bypassed += 1
+            with self._cache_lock:
+                self._cache_bypassed += 1
             # Bypass cache and call API directly
             return self.client.create(
                 model=model,
@@ -254,22 +256,25 @@ class CachedLLMClient:
             **kwargs
         )
         
-        # Check if we have a valid cached response
-        if cache_key in self._cache:
-            cached_result, timestamp = self._cache[cache_key]
-            
-            # Check if cache entry is still valid
-            if self._is_cache_valid(timestamp):
-                # Cache hit! Move to end (most recently used)
-                self._cache.move_to_end(cache_key)
-                self._cache_hits += 1
-                return cached_result
-            else:
-                # Cache entry expired, remove it
-                del self._cache[cache_key]
+        # Check if we have a valid cached response (thread-safe)
+        with self._cache_lock:
+            if cache_key in self._cache:
+                cached_result, timestamp = self._cache[cache_key]
+                
+                # Check if cache entry is still valid
+                if self._is_cache_valid(timestamp):
+                    # Cache hit! Move to end (most recently used)
+                    self._cache.move_to_end(cache_key)
+                    self._cache_hits += 1
+                    return cached_result
+                else:
+                    # Cache entry expired, remove it
+                    del self._cache[cache_key]
         
-        # Cache miss - call the API
-        self._cache_misses += 1
+        # Cache miss - call the API (outside lock to allow concurrent API calls)
+        with self._cache_lock:
+            self._cache_misses += 1
+        
         result = self.client.create(
             model=model,
             messages=messages,
@@ -280,17 +285,18 @@ class CachedLLMClient:
             **kwargs
         )
         
-        # Store result in cache with current timestamp
-        current_time = time.time()
-        self._cache[cache_key] = (result, current_time)
-        
-        # Evict oldest entry if cache is full
-        if len(self._cache) > self.max_cache_size:
-            self._evict_oldest()
-        
-        # Periodically clean up expired entries (every 10 misses)
-        if self._cache_misses % 10 == 0:
-            self._evict_expired()
+        # Store result in cache with current timestamp (thread-safe)
+        with self._cache_lock:
+            current_time = time.time()
+            self._cache[cache_key] = (result, current_time)
+            
+            # Evict oldest entry if cache is full
+            if len(self._cache) > self.max_cache_size:
+                self._evict_oldest()
+            
+            # Periodically clean up expired entries (every 10 misses)
+            if self._cache_misses % 10 == 0:
+                self._evict_expired()
         
         return result
     
@@ -301,30 +307,31 @@ class CachedLLMClient:
         Returns:
             CacheStatistics with hit rate and cost savings estimates
         """
-        total_requests = self._cache_hits + self._cache_misses + self._cache_bypassed
-        
-        # Calculate hit rate (only for cacheable requests)
-        cacheable_requests = self._cache_hits + self._cache_misses
-        if cacheable_requests > 0:
-            hit_rate = self._cache_hits / cacheable_requests
-        else:
-            hit_rate = 0.0
-        
-        # Estimate cost savings
-        # Assume cache hits save 100% of API cost for those requests
-        if total_requests > 0:
-            cost_savings = self._cache_hits / total_requests
-        else:
-            cost_savings = 0.0
-        
-        return CacheStatistics(
-            cache_hits=self._cache_hits,
-            cache_misses=self._cache_misses,
-            cache_bypassed=self._cache_bypassed,
-            total_requests=total_requests,
-            hit_rate=hit_rate,
-            cost_savings_estimate=cost_savings
-        )
+        with self._cache_lock:
+            total_requests = self._cache_hits + self._cache_misses + self._cache_bypassed
+            
+            # Calculate hit rate (only for cacheable requests)
+            cacheable_requests = self._cache_hits + self._cache_misses
+            if cacheable_requests > 0:
+                hit_rate = self._cache_hits / cacheable_requests
+            else:
+                hit_rate = 0.0
+            
+            # Estimate cost savings
+            # Assume cache hits save 100% of API cost for those requests
+            if total_requests > 0:
+                cost_savings = self._cache_hits / total_requests
+            else:
+                cost_savings = 0.0
+            
+            return CacheStatistics(
+                cache_hits=self._cache_hits,
+                cache_misses=self._cache_misses,
+                cache_bypassed=self._cache_bypassed,
+                total_requests=total_requests,
+                hit_rate=hit_rate,
+                cost_savings_estimate=cost_savings
+            )
     
     def clear_cache(self):
         """
@@ -332,7 +339,8 @@ class CachedLLMClient:
         
         Useful for testing or when you want to force fresh API calls.
         """
-        self._cache.clear()
+        with self._cache_lock:
+            self._cache.clear()
     
     def reset_statistics(self):
         """
@@ -340,9 +348,10 @@ class CachedLLMClient:
         
         Useful for benchmarking or testing.
         """
-        self._cache_hits = 0
-        self._cache_misses = 0
-        self._cache_bypassed = 0
+        with self._cache_lock:
+            self._cache_hits = 0
+            self._cache_misses = 0
+            self._cache_bypassed = 0
     
     def get_cache_size(self) -> int:
         """
@@ -351,7 +360,8 @@ class CachedLLMClient:
         Returns:
             Number of cached responses
         """
-        return len(self._cache)
+        with self._cache_lock:
+            return len(self._cache)
     
     def validate_api_key(self) -> bool:
         """
