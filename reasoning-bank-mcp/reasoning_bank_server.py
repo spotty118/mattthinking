@@ -502,7 +502,7 @@ async def retrieve_memories(
             }
             
             # Include error context if present
-            if memory.error_context:
+            if memory.error_context is not None:
                 memory_dict["error_context"] = memory.error_context
             
             formatted_memories.append(memory_dict)
@@ -808,7 +808,7 @@ async def search_knowledge(
             }
             
             # Include error context if present
-            if memory.error_context:
+            if memory.error_context is not None:
                 item["error_context"] = memory.error_context
             
             knowledge_items.append(item)
@@ -1177,7 +1177,6 @@ async def cleanup_old_data(
                 }
             
             # Use WorkspaceManager for safe deletion
-            from workspace_manager import WorkspaceManager
             workspace_manager = WorkspaceManager()
             
             result = workspace_manager.delete_workspace(

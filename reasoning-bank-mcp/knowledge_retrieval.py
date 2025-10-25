@@ -256,7 +256,7 @@ class KnowledgeRetriever:
         )
         
         # Filter to only memories with error context
-        error_memories = [m for m in memories if m.error_context]
+        error_memories = [m for m in memories if m.error_context is not None]
         
         logger.info(f"Retrieved {len(error_memories)} error pattern memories")
         
@@ -297,7 +297,7 @@ class KnowledgeRetriever:
             formatted_parts.append(f"\n**Content:**\n{memory.content}")
             
             # Add error warning if present
-            if memory.error_context:
+            if memory.error_context is not None:
                 formatted_parts.append("\n⚠️ **Error Warning:** This memory contains failure patterns:")
                 formatted_parts.append(f"- **Error Type:** {memory.error_context.get('error_type', 'Unknown')}")
                 formatted_parts.append(f"- **Failure Pattern:** {memory.error_context.get('failure_pattern', 'N/A')}")
@@ -383,7 +383,7 @@ class KnowledgeRetriever:
             boosted_score = base_score
             
             # Apply error context boost
-            if memory.error_context and boost_factors.get("has_error"):
+            if memory.error_context is not None and boost_factors.get("has_error"):
                 boosted_score *= boost_factors["has_error"]
             
             # Apply recency boost (if memory is recent)
@@ -450,9 +450,11 @@ class KnowledgeRetriever:
             - filtered_memories_count: Memories after filtering
             - avg_memories_per_query: Average memories per query
         """
-        avg_per_query = 0.0
-        if self._queries_executed > 0:
-            avg_per_query = self._total_memories_retrieved / self._queries_executed
+        avg_per_query = (
+            self._total_memories_retrieved / self._queries_executed
+            if self._queries_executed > 0
+            else 0.0
+        )
         
         return {
             "queries_executed": self._queries_executed,

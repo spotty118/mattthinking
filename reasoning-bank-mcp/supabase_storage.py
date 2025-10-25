@@ -30,6 +30,7 @@ except ImportError:
 
 from storage_adapter import StorageBackendInterface
 from schemas import MemoryItemSchema
+from reasoning_bank_core import MemoryItem
 from exceptions import (
     MemoryRetrievalError,
     MemoryStorageError,
@@ -121,19 +122,33 @@ class SupabaseAdapter(StorageBackendInterface):
         self._verify_schema()
     
     def _verify_schema(self):
-        """Verify that required tables and extensions exist"""
+        """Verify that required tables, extensions, and RPC functions exist"""
         try:
             # Check if pgvector extension is enabled
-            result = self.client.rpc('check_pgvector_enabled').execute()
+            try:
+                result = self.client.rpc('check_pgvector_enabled').execute()
+            except Exception as e:
+                logger.warning(f"pgvector extension check failed: {e}")
             
             # Simple table existence check
             self.client.table(self.traces_table).select("id", count="exact").limit(0).execute()
             self.client.table(self.memories_table).select("id", count="exact").limit(0).execute()
             
+            # Verify required RPC functions exist
+            required_rpcs = ['search_similar_traces', 'search_similar_memories']
+            for rpc_name in required_rpcs:
+                try:
+                    # Test call with minimal params
+                    self.client.rpc(rpc_name, {"query_embedding": [0.0] * 384, "match_count": 1}).execute()
+                except Exception as e:
+                    logger.error(f"Missing or invalid RPC function: {rpc_name}")
+                    logger.error(f"Error: {e}")
+                    raise ConnectionError(f"Required RPC function '{rpc_name}' not found or invalid in Supabase")
+            
             logger.info("Schema verification passed")
         except Exception as e:
             logger.warning(f"Schema verification failed: {str(e)}")
-            logger.warning("Run the SQL schema file (supabase_schema.sql) to create required tables")
+            logger.warning("Run the SQL schema file (supabase_schema.sql) to create required tables and functions")
     
     def generate_embedding(self, text: str) -> List[float]:
         """
@@ -311,7 +326,7 @@ class SupabaseAdapter(StorageBackendInterface):
         include_errors: bool = True,
         domain_filter: Optional[str] = None,
         workspace_id: Optional[str] = None
-    ) -> List[MemoryItemSchema]:
+    ) -> List[MemoryItem]:
         """
         Query similar memory items using semantic similarity
         
@@ -361,27 +376,26 @@ class SupabaseAdapter(StorageBackendInterface):
                 if not include_errors and error_context:
                     continue
                 
-                # Create MemoryItemSchema
-                memory_data = {
-                    "id": row["id"],
-                    "title": row["title"],
-                    "description": row["description"],
-                    "content": row["content"],
-                    "error_context": error_context,
-                    "pattern_tags": row.get("pattern_tags", []),
-                    "difficulty_level": row.get("difficulty_level"),
-                    "domain_category": row.get("domain_category"),
-                }
+                # Create MemoryItem with similarity score
+                # Note: Supabase doesn't provide distance, so we'll use a default similarity
+                similarity_score = 0.8  # Default similarity for Supabase
                 
-                # Add optional fields if present
-                if row.get("parent_memory_id"):
-                    memory_data["parent_memory_id"] = row["parent_memory_id"]
-                if row.get("derived_from"):
-                    memory_data["derived_from"] = row["derived_from"]
-                if row.get("evolution_stage") is not None:
-                    memory_data["evolution_stage"] = row["evolution_stage"]
-                
-                memory = MemoryItemSchema(**memory_data)
+                memory = MemoryItem(
+                    id=row["id"],
+                    title=row["title"],
+                    description=row["description"],
+                    content=row["content"],
+                    error_context=error_context,
+                    parent_memory_id=row.get("parent_memory_id"),
+                    derived_from=row.get("derived_from"),
+                    evolution_stage=row.get("evolution_stage", 0),
+                    pattern_tags=row.get("pattern_tags", []),
+                    difficulty_level=row.get("difficulty_level"),
+                    domain_category=row.get("domain_category"),
+                    similarity_score=similarity_score,
+                    trace_outcome=row.get("outcome"),
+                    trace_timestamp=row.get("created_at")
+                )
                 memories.append(memory)
                 
                 if len(memories) >= n_results:
@@ -464,9 +478,9 @@ class SupabaseAdapter(StorageBackendInterface):
             
             if has_error_context is not None:
                 if has_error_context:
-                    query = query.not_.is_("error_context", "null")
+                    query = query.not_.eq("error_context", None)
                 else:
-                    query = query.is_("error_context", "null")
+                    query = query.eq("error_context", None)
             
             result = query.execute()
             return result.count
@@ -513,7 +527,7 @@ class SupabaseAdapter(StorageBackendInterface):
             total_memories = total_memories_result.count or 0
             
             # Count memories with error context
-            error_memories_query = self.client.table(self.memories_table).select("*", count="exact").not_.is_("error_context", "null")
+            error_memories_query = self.client.table(self.memories_table).select("*", count="exact").not_.eq("error_context", None)
             if workspace_id:
                 error_memories_query = error_memories_query.eq("workspace_id", workspace_id)
             memories_with_errors = error_memories_query.execute().count or 0
@@ -551,3 +565,55 @@ class SupabaseAdapter(StorageBackendInterface):
                 "domain_distribution": {},
                 "pattern_tag_frequency": {}
             }
+    
+    def get_all_memories(self, workspace_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get all memory items for genealogy queries
+        
+        Args:
+            workspace_id: Optional workspace filter
+        
+        Returns:
+            Dictionary with memory data for genealogy analysis
+        
+        Raises:
+            MemoryRetrievalError: If retrieval fails
+        """
+        try:
+            # Build query
+            query = self.client.table(self.memories_table).select("*")
+            
+            # Apply workspace filter if provided
+            if workspace_id:
+                query = query.eq("workspace_id", workspace_id)
+            
+            # Execute query
+            result = query.execute()
+            
+            if not result.data:
+                return {"ids": [], "metadatas": []}
+            
+            # Transform to match ChromaDB format
+            ids = []
+            metadatas = []
+            
+            for memory in result.data:
+                ids.append(memory["id"])
+                metadatas.append({
+                    "memory_data": json.dumps(memory),
+                    "trace_id": memory.get("trace_id"),
+                    "outcome": memory.get("outcome"),
+                    "timestamp": memory.get("created_at"),
+                    "workspace_id": memory.get("workspace_id")
+                })
+            
+            return {
+                "ids": ids,
+                "metadatas": metadatas
+            }
+            
+        except Exception as e:
+            raise MemoryRetrievalError(
+                "Failed to get all memories",
+                context={"workspace_id": workspace_id, "error": str(e)}
+            )
