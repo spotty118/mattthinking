@@ -409,8 +409,10 @@ class ReasoningBank:
         Returns:
             Composite score between 0.0 and 1.0
         """
+        from datetime import timezone
+        
         if current_time is None:
-            current_time = datetime.now()
+            current_time = datetime.now(timezone.utc)
         
         # 1. Similarity score (from vector search)
         similarity = memory.similarity_score or 0.5  # Default if not available

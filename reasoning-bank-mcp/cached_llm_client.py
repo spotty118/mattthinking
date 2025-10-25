@@ -226,9 +226,6 @@ class CachedLLMClient:
         if model is None:
             model = self.client.default_model
         
-        # Track total requests
-        total_requests = self._cache_hits + self._cache_misses + self._cache_bypassed + 1
-        
         # Only cache deterministic calls (temperature=0.0)
         if not self.enable_cache or temperature != 0.0:
             self._cache_bypassed += 1

@@ -1,3 +1,6 @@
+# Core MCP Framework
+mcp>=1.0.0
+
 # Test and linting tools
 pytest>=7.4.0
 pytest-asyncio>=0.21.1

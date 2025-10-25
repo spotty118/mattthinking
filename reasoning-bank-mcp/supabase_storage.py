@@ -446,7 +446,7 @@ class SupabaseAdapter(StorageBackendInterface):
             return result.count
             
         except Exception as e:
-            self.logger.error(f"Failed to count traces: {str(e)}")
+            logger.error(f"Failed to count traces: {str(e)}")
             return 0
     
     def count_memories(self, has_error_context: Optional[bool] = None) -> int:
@@ -472,7 +472,7 @@ class SupabaseAdapter(StorageBackendInterface):
             return result.count
             
         except Exception as e:
-            self.logger.error(f"Failed to count memories: {str(e)}")
+            logger.error(f"Failed to count memories: {str(e)}")
             return 0
     
     def get_statistics(self, workspace_id: Optional[str] = None) -> Dict[str, Any]:
@@ -551,3 +551,152 @@ class SupabaseAdapter(StorageBackendInterface):
                 "domain_distribution": {},
                 "pattern_tag_frequency": {}
             }
+    
+    def delete_old_traces(
+        self,
+        retention_days: int,
+        workspace_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Delete traces and memories older than retention_days
+        
+        Args:
+            retention_days: Number of days to retain traces
+            workspace_id: Optional workspace filter
+        
+        Returns:
+            Dictionary with deletion statistics
+        """
+        try:
+            from datetime import timedelta
+            cutoff_date = datetime.now() - timedelta(days=retention_days)
+            cutoff_iso = cutoff_date.isoformat()
+            
+            logger.info(
+                f"Starting cleanup of traces older than {retention_days} days "
+                f"(cutoff: {cutoff_iso})"
+            )
+            
+            # Build query to find old traces
+            query = self.client.table(self.traces_table).select("id")
+            
+            if workspace_id:
+                query = query.eq("workspace_id", workspace_id)
+            
+            query = query.lt("timestamp", cutoff_iso)
+            
+            # Get traces to delete
+            old_traces_result = query.execute()
+            old_trace_ids = [row["id"] for row in old_traces_result.data]
+            
+            if not old_trace_ids:
+                logger.info("No old traces found to delete")
+                return {
+                    "deleted_traces_count": 0,
+                    "deleted_memories_count": 0,
+                    "freed_space_mb": 0.0,
+                    "retention_cutoff": cutoff_iso
+                }
+            
+            # Delete associated memories first
+            deleted_memories = 0
+            for trace_id in old_trace_ids:
+                memories_result = self.client.table(self.memories_table).delete().eq("trace_id", trace_id).execute()
+                if memories_result.data:
+                    deleted_memories += len(memories_result.data)
+            
+            # Delete traces
+            deleted_traces = 0
+            for trace_id in old_trace_ids:
+                self.client.table(self.traces_table).delete().eq("id", trace_id).execute()
+                deleted_traces += 1
+            
+            # Estimate freed space
+            freed_space_mb = (deleted_memories * 50) / 1024.0
+            
+            result = {
+                "deleted_traces_count": deleted_traces,
+                "deleted_memories_count": deleted_memories,
+                "freed_space_mb": round(freed_space_mb, 2),
+                "retention_cutoff": cutoff_iso
+            }
+            
+            logger.info(
+                f"Cleanup complete: {result['deleted_traces_count']} traces, "
+                f"{result['deleted_memories_count']} memories, "
+                f"~{result['freed_space_mb']} MB freed"
+            )
+            
+            return result
+            
+        except Exception as e:
+            from exceptions import MemoryStorageError
+            raise MemoryStorageError(
+                f"Failed to delete old traces",
+                context={
+                    "retention_days": retention_days,
+                    "workspace_id": workspace_id,
+                    "error": str(e)
+                }
+            )
+    
+    def delete_workspace(self, workspace_id: str) -> Dict[str, Any]:
+        """
+        Delete all traces and memories for a specific workspace
+        
+        Args:
+            workspace_id: Workspace identifier
+        
+        Returns:
+            Dictionary with deletion statistics
+        """
+        try:
+            logger.info(f"Deleting all data for workspace: {workspace_id}")
+            
+            # Get all traces for this workspace
+            traces_result = self.client.table(self.traces_table).select("id").eq("workspace_id", workspace_id).execute()
+            
+            if not traces_result.data:
+                logger.info(f"No data found for workspace {workspace_id}")
+                return {
+                    "workspace_id": workspace_id,
+                    "deleted_traces": 0,
+                    "deleted_memories": 0,
+                    "deletion_timestamp": datetime.now().isoformat()
+                }
+            
+            trace_ids = [row["id"] for row in traces_result.data]
+            
+            # Delete all memories for these traces
+            deleted_memories = 0
+            for trace_id in trace_ids:
+                memories_result = self.client.table(self.memories_table).delete().eq("trace_id", trace_id).execute()
+                if memories_result.data:
+                    deleted_memories += len(memories_result.data)
+            
+            # Delete all traces
+            deleted_traces = 0
+            for trace_id in trace_ids:
+                self.client.table(self.traces_table).delete().eq("id", trace_id).execute()
+                deleted_traces += 1
+            
+            result = {
+                "workspace_id": workspace_id,
+                "deleted_traces": deleted_traces,
+                "deleted_memories": deleted_memories,
+                "deletion_timestamp": datetime.now().isoformat()
+            }
+            
+            logger.info(
+                f"Workspace deletion complete: {result['deleted_traces']} traces, "
+                f"{result['deleted_memories']} memories deleted"
+            )
+            
+            return result
+            
+        except Exception as e:
+            from exceptions import MemoryStorageError
+            raise MemoryStorageError(
+                f"Failed to delete workspace {workspace_id}",
+                context={"workspace_id": workspace_id, "error": str(e)}
+            )

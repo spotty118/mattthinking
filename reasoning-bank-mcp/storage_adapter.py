@@ -220,6 +220,7 @@ class ChromaDBAdapter(StorageBackendInterface):
         
         self.persist_directory = persist_directory
         self.collection_name = collection_name
+        self.embedding_model_name = embedding_model  # Store model name for error reporting
         
         # Create persist directory if it doesn't exist
         os.makedirs(persist_directory, exist_ok=True)
@@ -286,7 +287,7 @@ class ChromaDBAdapter(StorageBackendInterface):
             raise EmbeddingError(
                 "Failed to generate embedding",
                 text=text[:100],
-                model_name=self.embedder.get_sentence_embedding_dimension(),
+                model_name=self.embedding_model_name,
                 context={"error": str(e)}
             )
     
