@@ -81,7 +81,7 @@ class MemoryItem:
         }
         
         # Add optional fields if present
-        if self.error_context:
+        if self.error_context is not None:
             data["error_context"] = self.error_context
         if self.parent_memory_id:
             data["parent_memory_id"] = self.parent_memory_id
@@ -123,7 +123,7 @@ class MemoryItem:
             f"**Content:**\n{self.content}"
         ]
         
-        if self.error_context:
+        if self.error_context is not None:
             parts.append(f"\n⚠️ **Error Warning:** This memory contains failure patterns:")
             parts.append(f"- Error Type: {self.error_context.get('error_type', 'Unknown')}")
             parts.append(f"- Pattern: {self.error_context.get('failure_pattern', 'N/A')}")
@@ -485,10 +485,7 @@ class ReasoningBank:
             # Retrieve all memories to build genealogy tree
             # Note: This is a simplified approach. For large datasets,
             # the storage backend should support direct relationship queries
-            all_results = self.storage.collection.get(
-                where={"workspace_id": workspace_id} if workspace_id else None,
-                include=["metadatas"]
-            )
+            all_results = self.storage.get_all_memories(workspace_id=workspace_id)
             
             if not all_results["ids"]:
                 raise MemoryRetrievalError(

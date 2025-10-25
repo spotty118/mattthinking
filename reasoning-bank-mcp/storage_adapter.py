@@ -37,6 +37,7 @@ except ImportError:
     logging.warning("sentence-transformers not available. Install with: pip install sentence-transformers")
 
 from schemas import MemoryItemSchema, ReasoningTraceSchema, OutcomeType
+from reasoning_bank_core import MemoryItem
 from exceptions import (
     MemoryStorageError,
     MemoryRetrievalError,
@@ -99,7 +100,7 @@ class StorageBackendInterface(ABC):
         include_errors: bool = True,
         domain_filter: Optional[str] = None,
         workspace_id: Optional[str] = None
-    ) -> List[MemoryItemSchema]:
+    ) -> List[MemoryItem]:
         """
         Query semantically similar memories
         
@@ -165,6 +166,22 @@ class StorageBackendInterface(ABC):
         
         Raises:
             MemoryStorageError: If deletion fails
+        """
+        pass
+    
+    @abstractmethod
+    def get_all_memories(self, workspace_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get all memory items for genealogy queries
+        
+        Args:
+            workspace_id: Optional workspace filter
+        
+        Returns:
+            Dictionary with memory data for genealogy analysis
+        
+        Raises:
+            MemoryRetrievalError: If retrieval fails
         """
         pass
 
@@ -367,24 +384,42 @@ class ChromaDBAdapter(StorageBackendInterface):
                 metadatas.append(item_metadata)
                 valid_items.append(memory_item)
             
-            # Generate embeddings in batch for better performance
-            if documents:
-                embeddings = self.batch_generator.generate_batch(documents)
+                # Generate embeddings with individual error handling
+                if documents:
+                    embeddings = []
+                    valid_docs = []
+                    valid_ids = []
+                    valid_metadatas = []
+                    valid_items_filtered = []
+                    
+                    for i, doc in enumerate(documents):
+                        try:
+                            emb = self._generate_embedding(doc)
+                            embeddings.append(emb)
+                            valid_docs.append(doc)
+                            valid_ids.append(ids[i])
+                            valid_metadatas.append(metadatas[i])
+                            valid_items_filtered.append(valid_items[i] if i < len(valid_items) else None)
+                        except Exception as e:
+                            logger.warning(f"Failed to generate embedding for document {i}, skipping: {e}")
+                            continue
                 
-                # Batch insert into ChromaDB
-                self.collection.add(
-                    ids=ids,
-                    embeddings=embeddings,
-                    documents=documents,
-                    metadatas=metadatas
-                )
+                # Batch insert only valid embeddings
+                if embeddings:
+                    self.collection.add(
+                        ids=valid_ids,
+                        embeddings=embeddings,
+                        documents=valid_docs,
+                        metadatas=valid_metadatas
+                    )
                 
                 # Cache the memories if caching is enabled
                 if self.enable_cache and self.memory_cache:
-                    for memory_id, memory_item in zip(ids, valid_items):
-                        self.memory_cache.put(memory_id, memory_item)
+                    for memory_id, memory_item in zip(valid_ids, valid_items_filtered):
+                        if memory_item:
+                            self.memory_cache.put(memory_id, memory_item)
                 
-                logger.info(f"Stored {len(ids)} memory items for trace {trace_id}")
+                logger.info(f"Stored {len(valid_ids)} memory items for trace {trace_id}")
             
             return trace_id
             
@@ -401,7 +436,7 @@ class ChromaDBAdapter(StorageBackendInterface):
         include_errors: bool = True,
         domain_filter: Optional[str] = None,
         workspace_id: Optional[str] = None
-    ) -> List[MemoryItemSchema]:
+    ) -> List[MemoryItem]:
         """
         Query semantically similar memories using vector search
         
@@ -455,17 +490,25 @@ class ChromaDBAdapter(StorageBackendInterface):
                     # ChromaDB uses L2 distance, convert to similarity score
                     similarity_score = 1.0 / (1.0 + distance)
                     
-                    # Create MemoryItemSchema
-                    memory = MemoryItemSchema(**memory_data)
+                    # Create MemoryItem with similarity score
+                    memory = MemoryItem(
+                        id=memory_data["id"],
+                        title=memory_data["title"],
+                        description=memory_data["description"],
+                        content=memory_data["content"],
+                        error_context=memory_data.get("error_context"),
+                        parent_memory_id=memory_data.get("parent_memory_id"),
+                        derived_from=memory_data.get("derived_from"),
+                        evolution_stage=memory_data.get("evolution_stage", 0),
+                        pattern_tags=memory_data.get("pattern_tags"),
+                        difficulty_level=memory_data.get("difficulty_level"),
+                        domain_category=memory_data.get("domain_category"),
+                        similarity_score=similarity_score,
+                        trace_outcome=metadata.get("outcome"),
+                        trace_timestamp=metadata.get("timestamp")
+                    )
                     
-                    # Add retrieval metadata (not part of schema, but useful)
-                    # Store in a way that doesn't break validation
-                    memory_dict = memory.model_dump()
-                    memory_dict["_similarity_score"] = similarity_score
-                    memory_dict["_trace_outcome"] = metadata.get("outcome")
-                    memory_dict["_trace_timestamp"] = metadata.get("timestamp")
-                    
-                    memories.append(MemoryItemSchema(**{k: v for k, v in memory_dict.items() if not k.startswith("_")}))
+                    memories.append(memory)
             
             logger.info(f"Retrieved {len(memories)} memories for query: {query_text[:50]}...")
             return memories
@@ -842,6 +885,45 @@ class ChromaDBAdapter(StorageBackendInterface):
         except Exception as e:
             raise MemoryStorageError(
                 f"Failed to delete workspace {workspace_id}",
+                context={"workspace_id": workspace_id, "error": str(e)}
+            )
+    
+    def get_all_memories(self, workspace_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get all memory items for genealogy queries
+        
+        Args:
+            workspace_id: Optional workspace filter
+        
+        Returns:
+            Dictionary with memory data for genealogy analysis
+        
+        Raises:
+            MemoryRetrievalError: If retrieval fails
+        """
+        try:
+            # Build where filter
+            where_filter = {}
+            if workspace_id:
+                where_filter["workspace_id"] = workspace_id
+            
+            # Get all items
+            results = self.collection.get(
+                where=where_filter if where_filter else None,
+                include=["metadatas"]
+            )
+            
+            if not results["ids"]:
+                return {"ids": [], "metadatas": []}
+            
+            return {
+                "ids": results["ids"],
+                "metadatas": results["metadatas"]
+            }
+            
+        except Exception as e:
+            raise MemoryRetrievalError(
+                "Failed to get all memories",
                 context={"workspace_id": workspace_id, "error": str(e)}
             )
 

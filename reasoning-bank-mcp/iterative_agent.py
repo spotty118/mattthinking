@@ -613,28 +613,12 @@ class IterativeReasoningAgent:
         try:
             # Check if we're already in an event loop
             try:
-                loop = asyncio.get_running_loop()
-                # We're in an async context - run tasks directly in current loop
-                logger.info("Running parallel generation in existing event loop")
-                # Create a new task for parallel execution
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=k) as executor:
-                    # Run synchronous generation in thread pool
-                    futures = []
-                    for i in range(1, k + 1):
-                        future = executor.submit(self._generate_single_candidate, task, memories, i)
-                        futures.append(future)
-                    
-                    results = []
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            result = future.result()
-                            results.append(result)
-                        except Exception as e:
-                            results.append(e)
-                
+                asyncio.get_running_loop()
+                # We're in an async context - use sequential to avoid complexity
+                logger.info("Detected existing event loop, using sequential generation")
+                return self._generate_sequential_solutions(task, memories, k, trajectory)
             except RuntimeError:
-                # No event loop, create one
+                # No event loop - safe to create one
                 results = asyncio.run(run_parallel())
         except Exception as e:
             logger.error(f"Parallel generation failed: {e}, falling back to sequential")
@@ -1091,9 +1075,12 @@ Feedback: <specific feedback for improvement>
     
     def _estimate_tokens(self, text: str) -> int:
         """
-        Estimate token count using 4 chars/token heuristic
+        Estimate token count using improved heuristic
         
-        This is a rough estimate. Actual tokenization may vary.
+        Uses a more sophisticated approach that considers:
+        - Code blocks (higher token density)
+        - Whitespace and punctuation
+        - Language-specific patterns
         
         Args:
             text: Text to estimate
@@ -1101,7 +1088,40 @@ Feedback: <specific feedback for improvement>
         Returns:
             Estimated token count
         """
-        return len(text) // 4
+        # Try to use tiktoken for more accurate estimation
+        try:
+            import tiktoken
+            encoding = tiktoken.get_encoding("cl100k_base")  # GPT-4 encoding
+            return len(encoding.encode(text))
+        except ImportError:
+            # Fallback to improved heuristic
+            # Count code blocks (higher density)
+            code_blocks = text.count('```')
+            code_content = 0
+            if code_blocks > 0:
+                # Estimate code content length
+                lines = text.split('\n')
+                in_code = False
+                for line in lines:
+                    if line.strip().startswith('```'):
+                        in_code = not in_code
+                    elif in_code:
+                        code_content += len(line)
+            
+            # Base estimation with adjustments
+            base_tokens = len(text) // 4
+            
+            # Adjust for code content (higher density)
+            if code_content > 0:
+                code_tokens = code_content // 3  # More tokens per char in code
+                base_tokens = base_tokens - (code_content // 4) + code_tokens
+            
+            # Adjust for whitespace and punctuation
+            whitespace_ratio = text.count(' ') / len(text) if len(text) > 0 else 0
+            if whitespace_ratio > 0.2:  # High whitespace
+                base_tokens = int(base_tokens * 0.9)
+            
+            return max(1, base_tokens)  # Ensure at least 1 token
     
     def _truncate_prompt(self, prompt: str, max_tokens: int) -> str:
         """
