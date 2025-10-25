@@ -1,0 +1,95 @@
+services:
+  reasoning-bank:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: reasoning-bank-mcp
+    stdin_open: true
+    tty: true
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    volumes:
+      - chroma-data:/app/chroma_data
+      - traces-data:/app/traces
+      - ./logs:/app/logs
+    ports:
+      - "8000:8000"
+    environment:
+      # API Keys
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      
+      # Storage backend: chromadb or supabase
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-chromadb}
+      - COLLECTION_NAME=${COLLECTION_NAME:-reasoning_memories}
+      
+      # ChromaDB configuration (used if STORAGE_BACKEND=chromadb)
+      - REASONING_BANK_DATA=/app/chroma_data
+      - REASONING_BANK_TRACES=/app/traces
+      
+      # Supabase configuration (used if STORAGE_BACKEND=supabase)
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SUPABASE_TRACES_TABLE=${SUPABASE_TRACES_TABLE:-reasoning_traces}
+      - SUPABASE_MEMORIES_TABLE=${SUPABASE_MEMORIES_TABLE:-memory_items}
+      
+      # Model Configuration
+      - REASONING_MODEL=${REASONING_MODEL:-google/gemini-2.5-pro}
+      - REASONING_EFFORT=${REASONING_EFFORT:-medium}
+      
+      # Memory and Iteration Settings
+      - RETRIEVAL_K=${RETRIEVAL_K:-3}
+      - MAX_MEMORY_ITEMS=${MAX_MEMORY_ITEMS:-3}
+      - MAX_ITERATIONS=${MAX_ITERATIONS:-3}
+      - SUCCESS_THRESHOLD=${SUCCESS_THRESHOLD:-0.8}
+      
+      # Temperature Settings
+      - TEMPERATURE_GENERATE=${TEMPERATURE_GENERATE:-0.7}
+      - TEMPERATURE_JUDGE=${TEMPERATURE_JUDGE:-0.0}
+      
+      # Token Budget Configuration
+      - MAX_OUTPUT_TOKENS=${MAX_OUTPUT_TOKENS:-9000}
+      - MAX_PROMPT_TOKENS=${MAX_PROMPT_TOKENS:-12000}
+      - GENERATION_TOKENS=${GENERATION_TOKENS:-8000}
+      - EVALUATION_TOKENS=${EVALUATION_TOKENS:-3000}
+      - JUDGMENT_TOKENS=${JUDGMENT_TOKENS:-4000}
+      - MEMORY_EXTRACTION_TOKENS=${MEMORY_EXTRACTION_TOKENS:-6000}
+      - TRUNCATION_THRESHOLD=${TRUNCATION_THRESHOLD:-12000}
+      - TRUNCATION_HEAD_RATIO=${TRUNCATION_HEAD_RATIO:-0.6}
+      
+      # Retry Configuration
+      - RETRY_ATTEMPTS=${RETRY_ATTEMPTS:-3}
+      - RETRY_MIN_WAIT=${RETRY_MIN_WAIT:-2}
+      - RETRY_MAX_WAIT=${RETRY_MAX_WAIT:-10}
+      
+      # Cache Configuration
+      - ENABLE_CACHE=${ENABLE_CACHE:-true}
+      - CACHE_SIZE=${CACHE_SIZE:-100}
+      - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS:-3600}
+      
+      # MCP Server Configuration
+      - MCP_TRANSPORT=${MCP_TRANSPORT:-stdio}
+      - MCP_PORT=${MCP_PORT:-8000}
+      
+      # Telemetry
+      - ANONYMIZED_TELEMETRY=${ANONYMIZED_TELEMETRY:-FALSE}
+    restart: unless-stopped
+    command: python reasoning_bank_server.py
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+    networks:
+      - reasoning-bank-network
+
+networks:
+  reasoning-bank-network:
+    driver: bridge
+
+volumes:
+  chroma-data:
+    driver: local
+  traces-data:
+    driver: local

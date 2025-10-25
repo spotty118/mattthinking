@@ -1,0 +1,24 @@
+# Core MCP Framework
+mcp>=1.0.0
+
+# Vector Database and Embeddings
+chromadb>=0.6.3
+sentence-transformers>=2.2.0
+numpy>=1.24.0
+
+# Data Validation and Schemas
+pydantic>=2.0.0
+
+# HTTP and API Clients
+httpx>=0.25.0
+openai>=1.0.0
+requests>=2.31.0
+
+# Retry and Resilience
+tenacity>=8.2.3
+
+# Structured Logging
+structlog>=24.1.0
+
+# Cloud Storage (Optional)
+supabase>=2.0.0
