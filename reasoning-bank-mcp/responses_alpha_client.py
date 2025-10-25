@@ -266,11 +266,13 @@ class ResponsesAPIClient:
                     headers=headers
                 )
             else:
+                # Use tuple timeout format: (connect_timeout, read_timeout)
+                # 10 seconds for connection, self.timeout for reading
                 response = requests.post(
                     self.chat_endpoint,
                     json=payload,
                     headers=headers,
-                    timeout=self.timeout
+                    timeout=(10, self.timeout)
                 )
             
             # Check for HTTP errors
