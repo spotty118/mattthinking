@@ -1,5 +1,9 @@
-# Core MCP Framework
-mcp>=1.0.0
+# Test and linting tools
+pytest>=7.4.0
+pytest-asyncio>=0.21.1
+# Optionally include type checker/linter (can be installed in dev environments)
+# mypy>=1.7.1
+# ruff>=0.1.11
 
 # Vector Database and Embeddings
 chromadb>=0.6.3
