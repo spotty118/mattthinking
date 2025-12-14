@@ -13,6 +13,7 @@ Requirements addressed: 1.2, 11.3, 14.1, 14.2
 import logging
 import hashlib
 import time
+import threading
 from typing import List, Dict, Any, Optional, Tuple
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -124,6 +125,7 @@ class MemoryCache:
         self.max_size = max_size
         self.ttl_seconds = ttl_seconds
         self.cache: OrderedDict[str, CachedMemory] = OrderedDict()
+        self._lock = threading.Lock()  # Thread safety for cache operations
         
         # Statistics
         self.hits = 0
@@ -144,29 +146,30 @@ class MemoryCache:
         Returns:
             Memory data if found and valid, None otherwise
         """
-        if memory_id not in self.cache:
-            self.misses += 1
-            return None
-        
-        cached = self.cache[memory_id]
-        current_time = time.time()
-        
-        # Check TTL
-        if current_time - cached.cache_time > self.ttl_seconds:
-            # Expired, remove from cache
-            del self.cache[memory_id]
-            self.misses += 1
-            return None
-        
-        # Cache hit - update access metadata
-        self.hits += 1
-        cached.access_count += 1
-        cached.last_access = current_time
-        
-        # Move to end (most recently used)
-        self.cache.move_to_end(memory_id)
-        
-        return cached.memory_data
+        with self._lock:
+            if memory_id not in self.cache:
+                self.misses += 1
+                return None
+            
+            cached = self.cache[memory_id]
+            current_time = time.time()
+            
+            # Check TTL
+            if current_time - cached.cache_time > self.ttl_seconds:
+                # Expired, remove from cache
+                del self.cache[memory_id]
+                self.misses += 1
+                return None
+            
+            # Cache hit - update access metadata
+            self.hits += 1
+            cached.access_count += 1
+            cached.last_access = current_time
+            
+            # Move to end (most recently used)
+            self.cache.move_to_end(memory_id)
+            
+            return cached.memory_data
     
     def put(self, memory_id: str, memory_data: Dict[str, Any]):
         """
@@ -176,41 +179,44 @@ class MemoryCache:
             memory_id: Memory ID
             memory_data: Memory data to cache
         """
-        current_time = time.time()
-        
-        # If already in cache, update it
-        if memory_id in self.cache:
-            cached = self.cache[memory_id]
-            cached.memory_data = memory_data
-            cached.last_access = current_time
-            cached.cache_time = current_time
-            self.cache.move_to_end(memory_id)
-            return
-        
-        # Check if we need to evict
-        if len(self.cache) >= self.max_size:
-            # Evict least recently used
-            evicted_id, _ = self.cache.popitem(last=False)
-            self.evictions += 1
-            logger.debug(f"Evicted memory {evicted_id} from cache")
-        
-        # Add new entry
-        self.cache[memory_id] = CachedMemory(
-            memory_data=memory_data,
-            access_count=1,
-            last_access=current_time,
-            cache_time=current_time
-        )
+        with self._lock:
+            current_time = time.time()
+            
+            # If already in cache, update it
+            if memory_id in self.cache:
+                cached = self.cache[memory_id]
+                cached.memory_data = memory_data
+                cached.last_access = current_time
+                cached.cache_time = current_time
+                self.cache.move_to_end(memory_id)
+                return
+            
+            # Check if we need to evict
+            if len(self.cache) >= self.max_size:
+                # Evict least recently used
+                evicted_id, _ = self.cache.popitem(last=False)
+                self.evictions += 1
+                logger.debug(f"Evicted memory {evicted_id} from cache")
+            
+            # Add new entry
+            self.cache[memory_id] = CachedMemory(
+                memory_data=memory_data,
+                access_count=1,
+                last_access=current_time,
+                cache_time=current_time
+            )
     
     def invalidate(self, memory_id: str):
         """Remove memory from cache"""
-        if memory_id in self.cache:
-            del self.cache[memory_id]
+        with self._lock:
+            if memory_id in self.cache:
+                del self.cache[memory_id]
     
     def clear(self):
         """Clear all cached memories"""
-        self.cache.clear()
-        logger.info("Memory cache cleared")
+        with self._lock:
+            self.cache.clear()
+            logger.info("Memory cache cleared")
     
     def get_statistics(self) -> Dict[str, Any]:
         """Get cache statistics"""

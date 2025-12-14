@@ -319,12 +319,26 @@ async def solve_coding_task(
                 task=task
             )
         
+        # Maximum length check to prevent DoS
+        MAX_TASK_LENGTH = 50000
+        if len(task) > MAX_TASK_LENGTH:
+            raise InvalidTaskError(
+                f"Task description too long (maximum {MAX_TASK_LENGTH} characters)",
+                task=task[:100]
+            )
+        
+        # Basic input sanitization - strip control characters except newlines/tabs
+        sanitized_task = ''.join(
+            c for c in task 
+            if c.isprintable() or c in '\n\t\r'
+        ).strip()
+        
         # Retrieve memories if requested
         memories = []
         if use_memory:
             try:
                 memories = reasoning_bank.retrieve_memories(
-                    query=task,
+                    query=sanitized_task,
                     n_results=config.retrieval_k
                 )
                 logger.info(f"Retrieved {len(memories)} relevant memories")
@@ -336,7 +350,7 @@ async def solve_coding_task(
         if enable_matts:
             logger.info(f"Solving with MaTTS: k={matts_k}, mode={matts_mode}")
             result = iterative_agent.solve_with_matts(
-                task=task,
+                task=sanitized_task,
                 memories=memories,
                 use_memory=use_memory,
                 k=matts_k,
@@ -346,7 +360,7 @@ async def solve_coding_task(
         else:
             logger.info("Solving with standard iterative refinement")
             result = iterative_agent.solve_task(
-                task=task,
+                task=sanitized_task,
                 memories=memories,
                 use_memory=use_memory
             )
@@ -357,7 +371,7 @@ async def solve_coding_task(
         
         # Judge solution and extract learnings
         judgment = reasoning_bank.judge_solution(
-            task=task,
+            task=sanitized_task,
             solution=result.solution,
             temperature=config.temperature_judge
         )
@@ -376,7 +390,7 @@ async def solve_coding_task(
                 
                 # Store trace with learnings
                 trace_id = reasoning_bank.store_trace(
-                    task=task,
+                    task=sanitized_task,
                     trajectory=result.trajectory,
                     outcome=outcome,
                     memory_items=judgment.get("learnings", []),
