@@ -11,8 +11,125 @@ from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Literal
 import requests
 import os
+import time
+import threading
+import logging
 from exceptions import LLMGenerationError, APIKeyError
 from performance_optimizer import APIConnectionPool
+
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Circuit Breaker Pattern
+# ============================================================================
+
+class CircuitBreaker:
+    """
+    Circuit breaker pattern for API resilience.
+    
+    States:
+    - CLOSED: Normal operation, requests pass through
+    - OPEN: Failures exceeded threshold, requests fail fast
+    - HALF_OPEN: Testing if service recovered
+    """
+    
+    STATE_CLOSED = "closed"
+    STATE_OPEN = "open"
+    STATE_HALF_OPEN = "half_open"
+    
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        reset_timeout: float = 60.0,
+        half_open_max_calls: int = 1
+    ):
+        """
+        Initialize circuit breaker.
+        
+        Args:
+            failure_threshold: Number of failures before opening circuit
+            reset_timeout: Seconds before attempting reset (moving to half-open)
+            half_open_max_calls: Calls allowed in half-open state
+        """
+        self.failure_threshold = failure_threshold
+        self.reset_timeout = reset_timeout
+        self.half_open_max_calls = half_open_max_calls
+        
+        self._state = self.STATE_CLOSED
+        self._failure_count = 0
+        self._last_failure_time: Optional[float] = None
+        self._half_open_calls = 0
+        self._lock = threading.Lock()
+        
+        logger.info(f"CircuitBreaker initialized: threshold={failure_threshold}, timeout={reset_timeout}s")
+    
+    @property
+    def state(self) -> str:
+        """Get current circuit state."""
+        with self._lock:
+            return self._state
+    
+    def can_proceed(self) -> bool:
+        """Check if request can proceed."""
+        with self._lock:
+            if self._state == self.STATE_CLOSED:
+                return True
+            
+            if self._state == self.STATE_OPEN:
+                # Check if reset timeout has passed
+                if self._last_failure_time and (time.time() - self._last_failure_time) >= self.reset_timeout:
+                    self._state = self.STATE_HALF_OPEN
+                    self._half_open_calls = 0
+                    logger.info("Circuit moved to HALF_OPEN state")
+                    return True
+                return False
+            
+            if self._state == self.STATE_HALF_OPEN:
+                if self._half_open_calls < self.half_open_max_calls:
+                    self._half_open_calls += 1
+                    return True
+                return False
+            
+            return False
+    
+    def record_success(self):
+        """Record a successful call."""
+        with self._lock:
+            if self._state == self.STATE_HALF_OPEN:
+                # Success in half-open state, reset circuit
+                self._state = self.STATE_CLOSED
+                self._failure_count = 0
+                logger.info("Circuit CLOSED after successful half-open call")
+            elif self._state == self.STATE_CLOSED:
+                # Reset failure count on success
+                self._failure_count = 0
+    
+    def record_failure(self):
+        """Record a failed call."""
+        with self._lock:
+            self._failure_count += 1
+            self._last_failure_time = time.time()
+            
+            if self._state == self.STATE_HALF_OPEN:
+                # Failure in half-open, back to open
+                self._state = self.STATE_OPEN
+                logger.warning("Circuit OPEN after half-open failure")
+            elif self._state == self.STATE_CLOSED:
+                if self._failure_count >= self.failure_threshold:
+                    self._state = self.STATE_OPEN
+                    logger.warning(f"Circuit OPEN after {self._failure_count} failures")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get circuit breaker statistics."""
+        with self._lock:
+            return {
+                "state": self._state,
+                "failure_count": self._failure_count,
+                "last_failure_time": self._last_failure_time,
+                "time_until_reset": max(0, self.reset_timeout - (time.time() - (self._last_failure_time or time.time()))) if self._state == self.STATE_OPEN else 0
+            }
 
 
 # Type alias for reasoning effort levels
@@ -112,6 +229,13 @@ class ResponsesAPIClient:
             # Fallback to regular requests if connection pool fails
             self.connection_pool = None
             self.use_connection_pool = False
+        
+        # Initialize circuit breaker for resilience
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=5,
+            reset_timeout=60.0,
+            half_open_max_calls=1
+        )
     
     def _convert_messages_to_responses_format(
         self,
@@ -258,6 +382,14 @@ class ResponsesAPIClient:
         }
         
         try:
+            # Check circuit breaker before making request
+            if not self.circuit_breaker.can_proceed():
+                raise LLMGenerationError(
+                    f"Circuit breaker OPEN - API unavailable (will retry after {self.circuit_breaker.reset_timeout}s)",
+                    model=model,
+                    context={"circuit_state": self.circuit_breaker.state}
+                )
+            
             # Make API request using connection pool if available
             if self.use_connection_pool and self.connection_pool:
                 response = self.connection_pool.post(
@@ -283,6 +415,10 @@ class ResponsesAPIClient:
                     error_detail = error_json.get("error", {}).get("message", error_detail)
                 except Exception:
                     pass
+                
+                # Record failure for circuit breaker (5xx errors indicate service issues)
+                if response.status_code >= 500:
+                    self.circuit_breaker.record_failure()
                 
                 raise LLMGenerationError(
                     f"API request failed: {error_detail}",
@@ -321,6 +457,9 @@ class ResponsesAPIClient:
                 # Reasoning tokens = total - input - output (rough estimate)
                 reasoning_tokens = max(0, total_tokens - input_tokens - output_tokens)
             
+            # Record success for circuit breaker
+            self.circuit_breaker.record_success()
+            
             return ResponsesAPIResult(
                 content=content,
                 reasoning_tokens=reasoning_tokens,
@@ -332,12 +471,14 @@ class ResponsesAPIClient:
             )
             
         except requests.exceptions.Timeout:
+            self.circuit_breaker.record_failure()  # Timeouts count as failures
             raise LLMGenerationError(
                 f"API request timed out after {self.timeout} seconds",
                 model=model,
                 context={"timeout": self.timeout}
             )
         except requests.exceptions.RequestException as e:
+            self.circuit_breaker.record_failure()  # Request errors count as failures
             raise LLMGenerationError(
                 f"API request failed: {str(e)}",
                 model=model,
@@ -347,6 +488,7 @@ class ResponsesAPIClient:
             # Catch any other unexpected errors
             if isinstance(e, LLMGenerationError):
                 raise
+            self.circuit_breaker.record_failure()
             raise LLMGenerationError(
                 f"Unexpected error during API call: {str(e)}",
                 model=model,
