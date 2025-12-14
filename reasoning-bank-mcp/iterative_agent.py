@@ -70,6 +70,163 @@ class MaTTSSolutionCandidate:
     candidate_id: int
 
 
+@dataclass
+class MAPElitesBin:
+    """A bin in the MAP-Elites archive holding the best solution for a feature combination"""
+    length_bin: int  # Solution length category (0=short, 1=medium, 2=long)
+    complexity_bin: int  # Solution complexity category (0=simple, 1=moderate, 2=complex)
+    best_candidate: Optional[MaTTSSolutionCandidate] = None
+    
+    def key(self) -> Tuple[int, int]:
+        """Return unique key for this bin"""
+        return (self.length_bin, self.complexity_bin)
+
+
+class MAPElitesSelector:
+    """
+    MAP-Elites quality-diversity selection for MaTTS.
+    
+    Instead of simply picking the highest-scoring solution, MAP-Elites
+    maintains an archive of diverse solutions across feature dimensions:
+    - Length dimension: short/medium/long solutions
+    - Complexity dimension: simple/moderate/complex solutions
+    
+    This preserves solution diversity while maintaining quality in each niche.
+    """
+    
+    def __init__(self, length_bins: int = 3, complexity_bins: int = 3):
+        """
+        Initialize MAP-Elites selector.
+        
+        Args:
+            length_bins: Number of bins for solution length (default: 3)
+            complexity_bins: Number of bins for complexity (default: 3)
+        """
+        self.length_bins = length_bins
+        self.complexity_bins = complexity_bins
+        self.archive: Dict[Tuple[int, int], MAPElitesBin] = {}
+        
+        # Initialize empty archive
+        for l in range(length_bins):
+            for c in range(complexity_bins):
+                self.archive[(l, c)] = MAPElitesBin(length_bin=l, complexity_bin=c)
+        
+        logger.debug(f"MAP-Elites initialized: {length_bins}x{complexity_bins} = {length_bins * complexity_bins} bins")
+    
+    def _compute_length_bin(self, solution: str) -> int:
+        """Compute length bin for a solution."""
+        length = len(solution)
+        if length < 500:
+            return 0  # Short
+        elif length < 2000:
+            return 1  # Medium
+        else:
+            return 2  # Long
+    
+    def _compute_complexity_bin(self, solution: str) -> int:
+        """
+        Compute complexity bin based on structural indicators.
+        
+        Complexity is estimated by:
+        - Code blocks (```)
+        - Numbered steps (1., 2., etc.)
+        - Headers (#, ##, etc.)
+        - Bullet points (-, *)
+        """
+        complexity_score = 0
+        
+        # Count code blocks
+        complexity_score += solution.count("```") // 2  # Each block is 2 markers
+        
+        # Count headers
+        complexity_score += len([line for line in solution.split('\n') if line.strip().startswith('#')])
+        
+        # Count numbered items
+        import re
+        complexity_score += len(re.findall(r'^\s*\d+\.', solution, re.MULTILINE))
+        
+        # Count bullet points
+        complexity_score += len(re.findall(r'^\s*[-*]', solution, re.MULTILINE))
+        
+        if complexity_score < 5:
+            return 0  # Simple
+        elif complexity_score < 15:
+            return 1  # Moderate
+        else:
+            return 2  # Complex
+    
+    def add_candidate(self, candidate: MaTTSSolutionCandidate) -> bool:
+        """
+        Add a candidate to the archive if it improves its bin.
+        
+        Args:
+            candidate: Solution candidate to consider
+            
+        Returns:
+            True if candidate was added (improved its bin), False otherwise
+        """
+        length_bin = self._compute_length_bin(candidate.solution)
+        complexity_bin = self._compute_complexity_bin(candidate.solution)
+        
+        # Clamp to valid range
+        length_bin = min(length_bin, self.length_bins - 1)
+        complexity_bin = min(complexity_bin, self.complexity_bins - 1)
+        
+        key = (length_bin, complexity_bin)
+        current_bin = self.archive[key]
+        
+        # Add if bin is empty or new candidate is better
+        if current_bin.best_candidate is None or candidate.score > current_bin.best_candidate.score:
+            current_bin.best_candidate = candidate
+            logger.debug(f"MAP-Elites: Added candidate {candidate.candidate_id} to bin {key} with score {candidate.score:.2f}")
+            return True
+        
+        return False
+    
+    def select_best(self) -> Optional[MaTTSSolutionCandidate]:
+        """Select the best overall candidate from the archive."""
+        best = None
+        for bin_entry in self.archive.values():
+            if bin_entry.best_candidate is not None:
+                if best is None or bin_entry.best_candidate.score > best.score:
+                    best = bin_entry.best_candidate
+        return best
+    
+    def select_diverse(self, n: int = 3) -> List[MaTTSSolutionCandidate]:
+        """
+        Select n diverse candidates from different bins.
+        
+        Args:
+            n: Number of diverse candidates to return
+            
+        Returns:
+            List of diverse candidates from different bins
+        """
+        # Get all non-empty bins sorted by score
+        candidates = [
+            bin_entry.best_candidate 
+            for bin_entry in self.archive.values() 
+            if bin_entry.best_candidate is not None
+        ]
+        candidates.sort(key=lambda c: c.score, reverse=True)
+        return candidates[:n]
+    
+    def get_archive_stats(self) -> Dict[str, Any]:
+        """Get statistics about the current archive."""
+        filled_bins = sum(1 for b in self.archive.values() if b.best_candidate is not None)
+        total_bins = len(self.archive)
+        scores = [b.best_candidate.score for b in self.archive.values() if b.best_candidate]
+        
+        return {
+            "filled_bins": filled_bins,
+            "total_bins": total_bins,
+            "coverage": filled_bins / total_bins if total_bins > 0 else 0,
+            "avg_score": sum(scores) / len(scores) if scores else 0,
+            "max_score": max(scores) if scores else 0,
+            "min_score": min(scores) if scores else 0
+        }
+
+
 # ============================================================================
 # Iterative Reasoning Agent
 # ============================================================================
@@ -450,22 +607,40 @@ class IterativeReasoningAgent:
                 early_termination=False,
                 loop_detected=False
             )
+        # Select best candidate using MAP-Elites quality-diversity selection
+        map_elites = MAPElitesSelector(length_bins=3, complexity_bins=3)
         
-        # Select best candidate
-        best_candidate = max(candidates, key=lambda c: c.score)
+        # Add all candidates to the archive
+        for candidate in candidates:
+            map_elites.add_candidate(candidate)
+        
+        # Get archive statistics for logging
+        archive_stats = map_elites.get_archive_stats()
+        logger.info(
+            f"MAP-Elites archive: {archive_stats['filled_bins']}/{archive_stats['total_bins']} bins filled, "
+            f"coverage={archive_stats['coverage']:.1%}, avg_score={archive_stats['avg_score']:.2f}"
+        )
+        
+        # Select best candidate from archive
+        best_candidate = map_elites.select_best()
+        
+        if best_candidate is None:
+            # Fallback to simple max if archive is empty
+            best_candidate = max(candidates, key=lambda c: c.score)
         
         logger.info(
-            f"Best candidate: id={best_candidate.candidate_id}, "
+            f"MAP-Elites selected: id={best_candidate.candidate_id}, "
             f"score={best_candidate.score:.2f}"
         )
         
         trajectory.append({
             "iteration": 0,
-            "action": "matts_select_best",
-            "output": f"Selected candidate {best_candidate.candidate_id} with score {best_candidate.score:.2f}",
+            "action": "matts_map_elites_select",
+            "output": f"Selected candidate {best_candidate.candidate_id} via MAP-Elites with score {best_candidate.score:.2f}",
             "candidate_id": best_candidate.candidate_id,
             "score": best_candidate.score,
-            "all_scores": [c.score for c in candidates]
+            "all_scores": [c.score for c in candidates],
+            "archive_stats": archive_stats
         })
         
         # Optionally refine the best solution

@@ -139,6 +139,140 @@ class MemoryItem:
 
 
 # ============================================================================
+# Artifact Feedback Tracker (OpenEvolve Pattern)
+# ============================================================================
+
+class ArtifactFeedbackTracker:
+    """
+    Tracks failure patterns and error context to improve future generation.
+    
+    This implements the OpenEvolve "artifact side-channel" pattern:
+    - Track which memories correlate with failed solutions
+    - Accumulate error patterns over time
+    - Feed error context back into generation prompts
+    - Down-weight problematic memories in future retrievals
+    
+    This enables continuous learning from failures.
+    """
+    
+    def __init__(self, decay_factor: float = 0.9):
+        """
+        Initialize the feedback tracker.
+        
+        Args:
+            decay_factor: How quickly to decay old failure counts (0.9 = slow decay)
+        """
+        self.decay_factor = decay_factor
+        # Map memory_id -> failure metadata
+        self._failure_counts: Dict[str, int] = {}
+        self._error_patterns: Dict[str, List[str]] = {}
+        self._last_errors: List[Dict[str, Any]] = []
+        self._max_error_history = 10
+        
+        logger.debug("ArtifactFeedbackTracker initialized")
+    
+    def record_failure(
+        self,
+        memory_ids: List[str],
+        error_type: str,
+        error_message: str,
+        task: str
+    ):
+        """
+        Record that certain memories were used when a failure occurred.
+        
+        Args:
+            memory_ids: IDs of memories that were used in the failed attempt
+            error_type: Type/category of the error
+            error_message: Detailed error message
+            task: The task that failed
+        """
+        # Increment failure count for each memory
+        for memory_id in memory_ids:
+            self._failure_counts[memory_id] = self._failure_counts.get(memory_id, 0) + 1
+            
+            # Track error patterns for this memory
+            if memory_id not in self._error_patterns:
+                self._error_patterns[memory_id] = []
+            if error_type not in self._error_patterns[memory_id]:
+                self._error_patterns[memory_id].append(error_type)
+        
+        # Add to recent error history
+        self._last_errors.append({
+            "error_type": error_type,
+            "error_message": error_message[:200],  # Truncate for safety
+            "task_preview": task[:100],
+            "memory_ids": memory_ids
+        })
+        
+        # Keep only recent errors
+        if len(self._last_errors) > self._max_error_history:
+            self._last_errors = self._last_errors[-self._max_error_history:]
+        
+        logger.info(f"Recorded failure for {len(memory_ids)} memories: {error_type}")
+    
+    def record_success(self, memory_ids: List[str]):
+        """
+        Record that memories were used in a successful solution.
+        
+        Decays failure counts for memories that contributed to success.
+        """
+        for memory_id in memory_ids:
+            if memory_id in self._failure_counts:
+                self._failure_counts[memory_id] = int(
+                    self._failure_counts[memory_id] * self.decay_factor
+                )
+    
+    def get_penalty_score(self, memory_id: str) -> float:
+        """
+        Get a penalty score for a memory based on failure history.
+        
+        Returns:
+            Penalty between 0.0 (no penalty) and 0.5 (heavy penalty)
+        """
+        failure_count = self._failure_counts.get(memory_id, 0)
+        # Logarithmic penalty: 0 failures = 0, 1 = 0.1, 5 = 0.3, 10+ = 0.5
+        if failure_count == 0:
+            return 0.0
+        return min(0.5, 0.1 * math.log(failure_count + 1))
+    
+    def get_feedback_context(self) -> str:
+        """
+        Generate feedback context to include in generation prompts.
+        
+        Returns:
+            Formatted string with recent error patterns to avoid
+        """
+        if not self._last_errors:
+            return ""
+        
+        lines = ["\n⚠️ **Recent Error Patterns to Avoid:**"]
+        seen_types = set()
+        
+        for error in self._last_errors[-5:]:  # Last 5 errors
+            if error["error_type"] not in seen_types:
+                lines.append(f"- {error['error_type']}: {error['error_message'][:100]}")
+                seen_types.add(error["error_type"])
+        
+        return "\n".join(lines)
+    
+    def get_problematic_memories(self, threshold: int = 3) -> List[str]:
+        """
+        Get memory IDs that have been frequently associated with failures.
+        
+        Args:
+            threshold: Minimum failure count to be considered problematic
+            
+        Returns:
+            List of memory IDs with failure count >= threshold
+        """
+        return [
+            mid for mid, count in self._failure_counts.items()
+            if count >= threshold
+        ]
+
+
+# ============================================================================
 # ReasoningBank Core Class
 # ============================================================================
 
@@ -305,22 +439,25 @@ class ReasoningBank:
         query: str,
         n_results: Optional[int] = None,
         include_errors: bool = True,
-        domain_filter: Optional[str] = None
+        domain_filter: Optional[str] = None,
+        use_hybrid_search: bool = True
     ) -> List[MemoryItem]:
         """
         Retrieve relevant memories with semantic search and composite scoring
         
         This method:
         1. Performs semantic search using embeddings
-        2. Computes composite scores (similarity + recency + error context)
-        3. Ranks memories by composite score
-        4. Returns top-k most relevant memories
+        2. (Optional) Applies hybrid search with keyword matching
+        3. Computes composite scores (similarity + recency + error context)
+        4. Ranks memories by composite score
+        5. Returns top-k most relevant memories
         
         Args:
             query: Search query text
             n_results: Number of results (defaults to self.retrieval_k)
             include_errors: Include memories with error context
             domain_filter: Optional domain category filter
+            use_hybrid_search: Enable vector + keyword fusion (default: True)
         
         Returns:
             List of MemoryItem objects ranked by composite score
@@ -350,6 +487,12 @@ class ReasoningBank:
                 logger.info(f"No memories found for query: {query[:50]}...")
                 return []
             
+            # Extract keywords for hybrid search
+            query_keywords = set()
+            if use_hybrid_search:
+                query_keywords = self._extract_keywords(query)
+                logger.debug(f"Hybrid search keywords: {query_keywords}")
+            
             # Convert to MemoryItem and compute composite scores
             memories_with_scores = []
             current_time = datetime.now(timezone.utc)
@@ -363,6 +506,11 @@ class ReasoningBank:
                     current_time=current_time
                 )
                 
+                # Apply hybrid keyword boost if enabled
+                if use_hybrid_search and query_keywords:
+                    keyword_boost = self._compute_keyword_boost(memory, query_keywords)
+                    composite_score = min(1.0, composite_score + keyword_boost * 0.15)  # Up to 15% boost
+                
                 memory.composite_score = composite_score
                 memories_with_scores.append(memory)
             
@@ -374,7 +522,7 @@ class ReasoningBank:
             
             logger.info(
                 f"Retrieved {len(top_memories)} memories for query: {query[:50]}... "
-                f"(top score: {top_memories[0].composite_score:.3f})"
+                f"(top score: {top_memories[0].composite_score:.3f}, hybrid={'on' if use_hybrid_search else 'off'})"
             )
             
             return top_memories
@@ -452,6 +600,68 @@ class ReasoningBank:
         composite = max(0.0, min(1.0, composite))
         
         return composite
+    
+    # Stopwords for keyword extraction
+    _STOPWORDS = frozenset({
+        'a', 'an', 'the', 'is', 'it', 'to', 'of', 'and', 'or', 'in', 'on', 'for',
+        'with', 'as', 'at', 'by', 'from', 'that', 'this', 'be', 'are', 'was',
+        'were', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did',
+        'will', 'would', 'could', 'should', 'can', 'may', 'might', 'must',
+        'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'she', 'they', 'them',
+        'what', 'which', 'who', 'whom', 'where', 'when', 'why', 'how',
+        'all', 'each', 'any', 'both', 'more', 'other', 'some', 'such', 'no',
+        'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just'
+    })
+    
+    def _extract_keywords(self, text: str) -> set:
+        """
+        Extract significant keywords from text for hybrid search.
+        
+        Args:
+            text: Text to extract keywords from
+            
+        Returns:
+            Set of lowercase keywords (length 3+, non-stopwords)
+        """
+        import re
+        # Extract words, lowercase, filter stopwords and short words
+        words = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', text.lower())
+        keywords = {
+            word for word in words
+            if len(word) >= 3 and word not in self._STOPWORDS
+        }
+        return keywords
+    
+    def _compute_keyword_boost(self, memory: MemoryItem, query_keywords: set) -> float:
+        """
+        Compute keyword overlap boost for hybrid search.
+        
+        Args:
+            memory: Memory to compute boost for
+            query_keywords: Keywords extracted from query
+            
+        Returns:
+            Boost score between 0.0 and 1.0 based on keyword overlap
+        """
+        if not query_keywords:
+            return 0.0
+        
+        # Extract keywords from memory title, description, and content
+        memory_text = f"{memory.title} {memory.description} {memory.content[:500]}"
+        memory_keywords = self._extract_keywords(memory_text)
+        
+        if not memory_keywords:
+            return 0.0
+        
+        # Calculate Jaccard-like overlap
+        overlap = len(query_keywords & memory_keywords)
+        max_possible = min(len(query_keywords), len(memory_keywords))
+        
+        if max_possible == 0:
+            return 0.0
+        
+        # Return normalized overlap (0 to 1)
+        return overlap / max_possible
     
     def get_genealogy(self, memory_id: str) -> Dict[str, Any]:
         """
