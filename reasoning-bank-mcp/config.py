@@ -18,6 +18,26 @@ from schemas import (
 )
 
 
+def safe_int(value: Optional[str], default: int) -> int:
+    """Safely parse integer from string with fallback to default."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_float(value: Optional[str], default: float) -> float:
+    """Safely parse float from string with fallback to default."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
 def load_config_from_env() -> ReasoningBankConfig:
     """
     Load configuration from environment variables with fallback to defaults
@@ -64,14 +84,14 @@ def load_config_from_env() -> ReasoningBankConfig:
     
     # Build token budget config
     token_budget = TokenBudgetConfig(
-        max_output_tokens=int(os.getenv("MAX_OUTPUT_TOKENS", "9000")),
-        max_prompt_tokens=int(os.getenv("MAX_PROMPT_TOKENS", "12000")),
-        generation_tokens=int(os.getenv("GENERATION_TOKENS", "8000")),
-        evaluation_tokens=int(os.getenv("EVALUATION_TOKENS", "3000")),
-        judgment_tokens=int(os.getenv("JUDGMENT_TOKENS", "4000")),
-        memory_extraction_tokens=int(os.getenv("MEMORY_EXTRACTION_TOKENS", "6000")),
-        truncation_threshold=int(os.getenv("TRUNCATION_THRESHOLD", "12000")),
-        truncation_head_ratio=float(os.getenv("TRUNCATION_HEAD_RATIO", "0.6"))
+        max_output_tokens=safe_int(os.getenv("MAX_OUTPUT_TOKENS"), 9000),
+        max_prompt_tokens=safe_int(os.getenv("MAX_PROMPT_TOKENS"), 12000),
+        generation_tokens=safe_int(os.getenv("GENERATION_TOKENS"), 8000),
+        evaluation_tokens=safe_int(os.getenv("EVALUATION_TOKENS"), 3000),
+        judgment_tokens=safe_int(os.getenv("JUDGMENT_TOKENS"), 4000),
+        memory_extraction_tokens=safe_int(os.getenv("MEMORY_EXTRACTION_TOKENS"), 6000),
+        truncation_threshold=safe_int(os.getenv("TRUNCATION_THRESHOLD"), 12000),
+        truncation_head_ratio=safe_float(os.getenv("TRUNCATION_HEAD_RATIO"), 0.6)
     )
     
     # Build main config
@@ -80,12 +100,12 @@ def load_config_from_env() -> ReasoningBankConfig:
         reasoning_effort=reasoning_effort,
         api_key=os.getenv("OPENROUTER_API_KEY"),
         token_budget=token_budget,
-        retrieval_k=int(os.getenv("RETRIEVAL_K", "3")),
-        max_memory_items=int(os.getenv("MAX_MEMORY_ITEMS", "3")),
-        max_iterations=int(os.getenv("MAX_ITERATIONS", "3")),
-        success_threshold=float(os.getenv("SUCCESS_THRESHOLD", "0.8")),
-        temperature_generate=float(os.getenv("TEMPERATURE_GENERATE", "0.7")),
-        temperature_judge=float(os.getenv("TEMPERATURE_JUDGE", "0.0")),
+        retrieval_k=safe_int(os.getenv("RETRIEVAL_K"), 3),
+        max_memory_items=safe_int(os.getenv("MAX_MEMORY_ITEMS"), 3),
+        max_iterations=safe_int(os.getenv("MAX_ITERATIONS"), 3),
+        success_threshold=safe_float(os.getenv("SUCCESS_THRESHOLD"), 0.8),
+        temperature_generate=safe_float(os.getenv("TEMPERATURE_GENERATE"), 0.7),
+        temperature_judge=safe_float(os.getenv("TEMPERATURE_JUDGE"), 0.0),
         # Storage backend selection
         storage_backend=storage_backend,
         # ChromaDB configuration
@@ -98,13 +118,13 @@ def load_config_from_env() -> ReasoningBankConfig:
         supabase_traces_table=os.getenv("SUPABASE_TRACES_TABLE", "reasoning_traces"),
         supabase_memories_table=os.getenv("SUPABASE_MEMORIES_TABLE", "memory_items"),
         # Retry configuration
-        retry_attempts=int(os.getenv("RETRY_ATTEMPTS", "3")),
-        retry_min_wait=int(os.getenv("RETRY_MIN_WAIT", "2")),
-        retry_max_wait=int(os.getenv("RETRY_MAX_WAIT", "10")),
+        retry_attempts=safe_int(os.getenv("RETRY_ATTEMPTS"), 3),
+        retry_min_wait=safe_int(os.getenv("RETRY_MIN_WAIT"), 2),
+        retry_max_wait=safe_int(os.getenv("RETRY_MAX_WAIT"), 10),
         # Cache configuration
         enable_cache=os.getenv("ENABLE_CACHE", "true").lower() == "true",
-        cache_size=int(os.getenv("CACHE_SIZE", "100")),
-        cache_ttl_seconds=int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+        cache_size=safe_int(os.getenv("CACHE_SIZE"), 100),
+        cache_ttl_seconds=safe_int(os.getenv("CACHE_TTL_SECONDS"), 3600)
     )
     
     return config

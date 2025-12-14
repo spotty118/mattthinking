@@ -140,8 +140,20 @@ class CachedLLMClient:
             "kwargs": sorted(kwargs.items())
         }
         
+        # Custom JSON encoder to handle non-serializable objects
+        def safe_json_default(obj):
+            """Fallback serializer for objects not serializable by default."""
+            try:
+                return str(obj)
+            except Exception:
+                return f"<{type(obj).__name__}>"
+        
         # Convert to JSON string (sorted keys for determinism)
-        cache_string = json.dumps(cache_data, sort_keys=True)
+        try:
+            cache_string = json.dumps(cache_data, sort_keys=True, default=safe_json_default)
+        except (TypeError, ValueError) as e:
+            # Ultimate fallback: use string representation of entire dict
+            cache_string = str(cache_data)
         
         # Generate SHA256 hash
         hash_obj = hashlib.sha256(cache_string.encode('utf-8'))

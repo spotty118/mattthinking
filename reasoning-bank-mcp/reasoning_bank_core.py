@@ -87,7 +87,7 @@ class MemoryItem:
             data["parent_memory_id"] = self.parent_memory_id
         if self.derived_from:
             data["derived_from"] = self.derived_from
-        if self.evolution_stage:
+        if self.evolution_stage is not None:
             data["evolution_stage"] = self.evolution_stage
         if self.pattern_tags:
             data["pattern_tags"] = self.pattern_tags

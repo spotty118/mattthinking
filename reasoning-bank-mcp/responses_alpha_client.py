@@ -281,7 +281,7 @@ class ResponsesAPIClient:
                 try:
                     error_json = response.json()
                     error_detail = error_json.get("error", {}).get("message", error_detail)
-                except:
+                except Exception:
                     pass
                 
                 raise LLMGenerationError(

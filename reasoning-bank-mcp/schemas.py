@@ -15,7 +15,7 @@ Benefits:
 """
 
 from typing import List, Dict, Optional, Literal, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
 import uuid
@@ -130,8 +130,8 @@ class MemoryItemSchema(BaseModel):
     
     # Metadata
     created_at: datetime = Field(
-        default_factory=datetime.now,
-        description="Creation timestamp"
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Creation timestamp (UTC)"
     )
     
     @field_validator("pattern_tags")
@@ -185,8 +185,8 @@ class ReasoningTraceSchema(BaseModel):
         description="Extracted memory items from this trace"
     )
     timestamp: datetime = Field(
-        default_factory=datetime.now,
-        description="Trace creation timestamp"
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Trace creation timestamp (UTC)"
     )
     metadata: Dict[str, Any] = Field(
         default_factory=dict,

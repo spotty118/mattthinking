@@ -452,8 +452,19 @@ class ChromaDBAdapter(StorageBackendInterface):
                             self.memory_cache.put(memory_id, memory_data)
                     
                     # Add similarity score (convert distance to similarity)
-                    # ChromaDB uses L2 distance, convert to similarity score
-                    similarity_score = 1.0 / (1.0 + distance)
+                    # ChromaDB can use different distance metrics, convert appropriately
+                    # Default is L2 distance, but can be 'cosine' or 'ip' (inner product)
+                    collection_metadata = self.collection.metadata or {}
+                    space = collection_metadata.get("hnsw:space", "l2")
+                    
+                    if space == "cosine":
+                        # Cosine distance ranges from 0-2, convert to 0-1 similarity
+                        similarity_score = 1.0 - (distance / 2.0)
+                    elif space == "ip":
+                        # Inner product is already a similarity measure
+                        similarity_score = distance
+                    else:  # L2 (default)
+                        similarity_score = 1.0 / (1.0 + distance)
                     
                     # Create MemoryItemSchema
                     memory = MemoryItemSchema(**memory_data)
@@ -822,8 +833,7 @@ class ChromaDBAdapter(StorageBackendInterface):
             # Clear from cache if caching enabled
             if self.enable_cache and self.memory_cache:
                 for memory_id in memory_ids:
-                    # Cache will naturally evict these
-                    pass
+                    self.memory_cache.invalidate(memory_id)
             
             result = {
                 "workspace_id": workspace_id,
