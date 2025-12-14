@@ -331,28 +331,130 @@ class KnowledgeRetriever:
         """
         Find memories related to a specific memory.
         
-        Uses the memory's content as a query to find similar memories.
-        Useful for exploring memory relationships and evolution.
+        Uses multiple strategies to find related memories:
+        1. Parent/child relationships via parent_memory_id
+        2. Sibling relationships via derived_from
+        3. Semantic similarity using the memory's content as query
         
         Args:
             memory_id: ID of the memory to find related memories for
             n_results: Number of related memories to return
         
         Returns:
-            List of related MemoryItem objects
-        
-        Note:
-            This is a simplified implementation. Full implementation would
-            require querying by memory ID and using genealogy relationships.
+            List of related MemoryItem objects, ordered by relationship strength
         """
-        # This is a placeholder implementation
-        # Full implementation would query the storage backend by ID
-        logger.warning(
-            "get_related_memories is a simplified implementation. "
-            "Full genealogy support requires enhanced storage backend."
-        )
+        related_memories: List[MemoryItem] = []
+        seen_ids = {memory_id}  # Avoid returning the source memory
         
-        return []
+        try:
+            # Get the source memory's information from storage
+            storage = self.reasoning_bank.storage_adapter
+            
+            # Query for the source memory to get its metadata
+            source_results = storage.collection.get(
+                ids=[memory_id],
+                include=["metadatas", "documents"]
+            )
+            
+            if not source_results or not source_results.get("ids"):
+                logger.warning(f"Source memory {memory_id} not found")
+                return []
+            
+            source_metadata = source_results["metadatas"][0] if source_results.get("metadatas") else {}
+            source_content = source_results["documents"][0] if source_results.get("documents") else ""
+            
+            # Strategy 1: Find parent memory if exists
+            parent_id = source_metadata.get("parent_memory_id")
+            if parent_id and parent_id not in seen_ids:
+                parent_results = storage.collection.get(
+                    ids=[parent_id],
+                    include=["metadatas", "documents"]
+                )
+                if parent_results and parent_results.get("ids"):
+                    parent_memory = self._create_memory_from_result(
+                        parent_id, parent_results, 0
+                    )
+                    if parent_memory:
+                        parent_memory.composite_score = 1.0  # Highest relevance for parent
+                        related_memories.append(parent_memory)
+                        seen_ids.add(parent_id)
+            
+            # Strategy 2: Find child memories (memories where parent_memory_id = this memory)
+            try:
+                child_results = storage.collection.get(
+                    where={"parent_memory_id": memory_id},
+                    include=["metadatas", "documents"]
+                )
+                if child_results and child_results.get("ids"):
+                    for idx, child_id in enumerate(child_results["ids"]):
+                        if child_id not in seen_ids and len(related_memories) < n_results:
+                            child_memory = self._create_memory_from_result(
+                                child_id, child_results, idx
+                            )
+                            if child_memory:
+                                child_memory.composite_score = 0.9  # High relevance for children
+                                related_memories.append(child_memory)
+                                seen_ids.add(child_id)
+            except Exception as e:
+                logger.debug(f"Child query failed (may not be supported): {e}")
+            
+            # Strategy 3: Find semantically similar memories using content as query
+            if len(related_memories) < n_results and source_content:
+                semantic_results = self.reasoning_bank.retrieve_memories(
+                    query=source_content[:500],  # Use first 500 chars for query
+                    n_results=n_results - len(related_memories) + 1  # +1 to account for self
+                )
+                for memory in semantic_results:
+                    if memory.id not in seen_ids:
+                        memory.composite_score = memory.composite_score or 0.5
+                        related_memories.append(memory)
+                        seen_ids.add(memory.id)
+                        if len(related_memories) >= n_results:
+                            break
+            
+            logger.info(f"Found {len(related_memories)} related memories for {memory_id}")
+            return related_memories[:n_results]
+            
+        except Exception as e:
+            logger.error(f"Error getting related memories: {e}")
+            return []
+    
+    def _create_memory_from_result(
+        self,
+        memory_id: str,
+        results: Dict[str, Any],
+        index: int
+    ) -> Optional[MemoryItem]:
+        """Create a MemoryItem from storage query results."""
+        try:
+            metadata = results["metadatas"][index] if results.get("metadatas") else {}
+            document = results["documents"][index] if results.get("documents") else ""
+            
+            # Parse memory_data from metadata if available
+            import json
+            memory_data_str = metadata.get("memory_data", "{}")
+            try:
+                memory_data = json.loads(memory_data_str) if isinstance(memory_data_str, str) else memory_data_str
+            except (json.JSONDecodeError, TypeError):
+                memory_data = {}
+            
+            return MemoryItem(
+                id=memory_id,
+                title=memory_data.get("title", metadata.get("title", "Untitled")),
+                description=memory_data.get("description", ""),
+                content=memory_data.get("content", document),
+                error_context=memory_data.get("error_context"),
+                parent_memory_id=metadata.get("parent_memory_id"),
+                evolution_stage=metadata.get("evolution_stage", 0),
+                pattern_tags=memory_data.get("pattern_tags", []),
+                domain_category=metadata.get("domain_category"),
+                trace_id=metadata.get("trace_id"),
+                trace_timestamp=metadata.get("timestamp"),
+                composite_score=0.0
+            )
+        except Exception as e:
+            logger.debug(f"Error creating memory from result: {e}")
+            return None
     
     def rank_by_relevance(
         self,

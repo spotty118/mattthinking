@@ -25,6 +25,19 @@ from exceptions import LLMGenerationError, JSONParseError
 logger = logging.getLogger(__name__)
 
 
+# Precompiled regex patterns for performance
+STEP_MARKERS_PATTERNS = [
+    re.compile(r"\d+\."),
+    re.compile(r"step \d+", re.IGNORECASE),
+    re.compile(r"first,", re.IGNORECASE),
+    re.compile(r"second,", re.IGNORECASE),
+    re.compile(r"third,", re.IGNORECASE),
+    re.compile(r"next,", re.IGNORECASE),
+    re.compile(r"then,", re.IGNORECASE),
+    re.compile(r"finally,", re.IGNORECASE),
+]
+
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -137,12 +150,8 @@ class PassiveLearner:
             logger.debug("Answer contains explanatory language - valuable")
             return True
         
-        # Heuristic 4: Contains step-by-step guidance
-        step_markers = [
-            r"\d+\.", r"step \d+", r"first,", r"second,", r"third,",
-            r"next,", r"then,", r"finally,"
-        ]
-        if any(re.search(marker, answer_lower) for marker in step_markers):
+        # Heuristic 4: Contains step-by-step guidance (precompiled patterns)
+        if any(pattern.search(answer_lower) for pattern in STEP_MARKERS_PATTERNS):
             logger.debug("Answer contains step-by-step guidance - valuable")
             return True
         
